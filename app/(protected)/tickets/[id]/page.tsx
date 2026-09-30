@@ -1,9 +1,10 @@
-﻿"use client";
+"use client";
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/api";
+import { describeApiError } from "@/lib/error-messages";
 import { useAuth } from "@/lib/auth-context";
-import { Ticket, Comment, TicketEvent, Tag, TicketStatus } from "@/lib/types";
+import { Ticket, Comment, TicketEvent, Tag, TicketStatus, User } from "@/lib/types";
 import { legalTransitions, transitionRequiresNote } from "@/lib/transitions";
 import {
   canAssign,
@@ -27,16 +28,6 @@ const statusColor: Record<string, string> = {
   closed: "text-gray-500",
 };
 
-// The Week 10 API has no endpoint to list agents/users, so assignee
-// options are hardcoded from known seed data. Documented in the README
-// as a known limitation - a real system would need a GET /users (or
-// similar) endpoint to populate this dynamically.
-const KNOWN_ASSIGNEES = [
-  { id: 1, label: "Ada Admin (admin)" },
-  { id: 2, label: "Alex Agent (agent)" },
-  { id: 3, label: "Amy Agent (agent)" },
-];
-
 function describeEvent(event: TicketEvent): string {
   const actorName = event.actor?.fullName ?? "Someone";
   if (event.fromStatus === event.toStatus) {
@@ -45,7 +36,7 @@ function describeEvent(event: TicketEvent): string {
     return event.note ? `${actorName}: ${event.note}` : `${actorName} updated the ticket`;
   }
   return `${actorName} moved status from ${event.fromStatus} to ${event.toStatus}${
-    event.note ? ` — "${event.note}"` : ""
+    event.note ? ` ? "${event.note}"` : ""
   }`;
 }
 
@@ -59,6 +50,7 @@ export default function TicketDetailPage() {
   const [comments, setComments] = useState<Comment[]>([]);
   const [events, setEvents] = useState<TicketEvent[]>([]);
   const [allTags, setAllTags] = useState<Tag[]>([]);
+  const [assignees, setAssignees] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -97,11 +89,10 @@ export default function TicketDetailPage() {
       setComments(commentsRes);
       setEvents(eventsRes);
     } catch (err) {
-      if (err instanceof ApiError) {
-        if (err.status === 404) setNotFound(true);
-        else setError(err.message);
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
       } else {
-        setError("Something went wrong.");
+        setError(describeApiError(err));
       }
     } finally {
       setLoading(false);
@@ -117,12 +108,24 @@ export default function TicketDetailPage() {
     }
   }, []);
 
+  const loadAssignees = useCallback(async () => {
+    try {
+      const users = await apiFetch<User[]>("/users/assignable");
+      setAssignees(users);
+    } catch {
+      // non-critical if this fails; the assign control just won't offer options
+    }
+  }, []);
+
   useEffect(() => {
     loadTicket();
     if (user && canManageTags(user.role)) {
       loadTags();
     }
-  }, [loadTicket, loadTags, user]);
+    if (user && canAssign(user.role)) {
+      loadAssignees();
+    }
+  }, [loadTicket, loadTags, loadAssignees, user]);
 
   async function handlePostComment(e: React.FormEvent) {
     e.preventDefault();
@@ -141,8 +144,7 @@ export default function TicketDetailPage() {
       setNewComment("");
       setIsInternalComment(false);
     } catch (err) {
-      if (err instanceof ApiError) setCommentError(err.message);
-      else setCommentError("Something went wrong.");
+      setCommentError(describeApiError(err));
     } finally {
       setPostingComment(false);
     }
@@ -162,8 +164,7 @@ export default function TicketDetailPage() {
       const freshEvents = await apiFetch<TicketEvent[]>(`/tickets/${id}/events`);
       setEvents(freshEvents);
     } catch (err) {
-      if (err instanceof ApiError) setAssignError(err.message);
-      else setAssignError("Something went wrong.");
+      setAssignError(describeApiError(err));
     } finally {
       setAssigning(false);
     }
@@ -192,8 +193,7 @@ export default function TicketDetailPage() {
       const freshEvents = await apiFetch<TicketEvent[]>(`/tickets/${id}/events`);
       setEvents(freshEvents);
     } catch (err) {
-      if (err instanceof ApiError) setStatusError(err.message);
-      else setStatusError("Something went wrong.");
+      setStatusError(describeApiError(err));
     } finally {
       setChangingStatus(false);
     }
@@ -210,8 +210,7 @@ export default function TicketDetailPage() {
       setTicket(updated);
       setTagSelect("");
     } catch (err) {
-      if (err instanceof ApiError) setTagError(err.message);
-      else setTagError("Something went wrong.");
+      setTagError(describeApiError(err));
     }
   }
 
@@ -223,8 +222,7 @@ export default function TicketDetailPage() {
         prev ? { ...prev, tags: prev.tags.filter((t) => t.id !== tagId) } : prev
       );
     } catch (err) {
-      if (err instanceof ApiError) setTagError(err.message);
-      else setTagError("Something went wrong.");
+      setTagError(describeApiError(err));
     }
   }
 
@@ -234,8 +232,7 @@ export default function TicketDetailPage() {
       await apiFetch<void>(`/tickets/${id}`, { method: "DELETE" });
       router.push("/tickets");
     } catch (err) {
-      if (err instanceof ApiError) setError(err.message);
-      else setError("Something went wrong.");
+      setError(describeApiError(err));
       setDeleting(false);
     }
   }
@@ -313,7 +310,7 @@ export default function TicketDetailPage() {
                 className="text-gray-400 hover:text-red-400 ml-1"
                 aria-label={`Remove ${t.name}`}
               >
-                ×
+                ?
               </button>
             )}
           </span>
@@ -353,8 +350,8 @@ export default function TicketDetailPage() {
             className={inputClass}
           >
             <option value="">Assign to...</option>
-            {KNOWN_ASSIGNEES.map((a) => (
-              <option key={a.id} value={a.id}>{a.label}</option>
+            {assignees.map((a) => (
+              <option key={a.id} value={a.id}>{a.fullName} ({a.role})</option>
             ))}
           </select>
           <button
